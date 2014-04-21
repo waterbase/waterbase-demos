@@ -77,6 +77,7 @@ Collection.prototype.init = function(callback) {
           collection._storage.splice(index, 1);
         }
       });
+      collection.onChange();
     }).apply(collection, arguments);
   });
   // Event: Update
@@ -89,6 +90,7 @@ Collection.prototype.init = function(callback) {
           }
         });
       });
+      collection.onChange();
     }).apply(collection, arguments);
   });
 };
@@ -138,8 +140,6 @@ Collection.prototype.retrieveAll = (function() {
         data.forEach(function (props, index) {
           collection._storage.push(new Model(props, collection.name, collection.io, collection.onChange));
         });
-
-        collection.onChange();
 
         if (callback) callback(data);
         collection.onChange();
