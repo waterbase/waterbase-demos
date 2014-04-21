@@ -5,12 +5,12 @@
  * @param {Object} Options for socket.io connection
  */
 
-var Waterbase = function (url, options, onchange) {
+var Waterbase = function (url, options, onChange) {
   this.url = url || 'http://localhost';
-  this.onchange = onchange || function(){};
+  this.onChange = onChange || function(){};
   this.options = options || {
     // Default Options
-    'force new connection': true,
+    'force new connection': true
   };
 
   // Open Socket Connection
@@ -26,7 +26,7 @@ var Waterbase = function (url, options, onchange) {
  */
 
 Waterbase.prototype.collection = function (collectionName, callback) {
-  return new Collection(collectionName, this.connection, callback, this.onchange);
+  return new Collection(collectionName, this.connection, callback, this.onChange);
 };
 
 /**
@@ -36,11 +36,10 @@ Waterbase.prototype.collection = function (collectionName, callback) {
  * @param {Connection} Reference to socket
  */
 
-var Collection = function (name, connection, callback, onchange) {
+var Collection = function (name, connection, callback, onChange) {
   this.name = name;
   this.io = connection;
-
-  this.onchange = onchange;
+  this.onChange = onChange || function () {};
 
   this._storage = [];
 
@@ -50,47 +49,47 @@ var Collection = function (name, connection, callback, onchange) {
 Collection.prototype.init = function(callback) {
   var collection = this;
 
-  this.io.on('connect', function () {
-    console.log('connected to socket server.');
+  this.io.on('connect', function (socket) {
     if (callback) callback();
 
     // Retrieve all models on start
     collection.retrieveAll();
+  });
 
-    // Data Binding Listener
-    collection.io.on('broadcast', function (eventType, data) {
-      // Retrieve newly created model from server
-      if (eventType === 'create') {
-        console.log('Event "create": ModelID', data[0]._id, 'in', collection.name);
-        collection.retrieveOne(data[0]._id);
-      }
-
-      // Delete all models from local collection
-      else if (eventType === 'deleteAll') {
-        data.forEach(function (name) {
-          if (collection.name === name) {
-            console.log('Event "deleteAll": Collection' + collection.name + ' emptied.');
-            collection.retrieveAll(function () {
-            });
-            // collection._storage = [];
+  // Data Binding Listeners
+  // Event: create
+  this.io.on('create', function () {
+    collection.handleBroadcast(function (data) {
+      collection.retrieveOne(data[0]._id);
+    }).apply(collection, arguments);
+  });
+  // Event: deleteAll
+  this.io.on('deleteAll', function () {
+    collection.handleBroadcast(function (data) {
+      collection.retrieveAll();
+    }).apply(collection, arguments);
+  });
+  // Event: deleteOne
+  this.io.on('deleteOne', function () {
+    collection.handleBroadcast(function (data) {
+      collection._storage.forEach(function (model, index) {
+        if (data[0]._id === model._id) {
+          collection._storage.splice(index, 1);
+        }
+      });
+    }).apply(collection, arguments);
+  });
+  // Event: Update
+  this.io.on('update', function () {
+    collection.handleBroadcast(function (data) {
+      data.forEach(function (set) {
+        collection._storage.forEach(function (model) {
+          if (set && set._id === model._id) {
+            model.set(set);
           }
         });
-      }
-
-      // Delete single model from local collection
-      else if (eventType === 'deleteOne') {
-        collection._storage.forEach(function (model, index) {
-          console.log(data);
-          if (data[0]._id === model._id) {
-            console.log('Event "deleteOne": ModelID', data[0]._id, 'from', collection.name);
-            collection._storage.splice(index, 1);
-          }
-        });
-      }
-
-      //data binding update trigger
-      collection.onchange();
-    });
+      });
+    }).apply(collection, arguments);
   });
 };
 
@@ -100,13 +99,11 @@ Collection.prototype.list = function() {
 
 Collection.prototype.show = function(id) {
   var result;
-
   this._storage.forEach(function (model) {
     if (model._id === id) {
       result = model;
     }
   });
-
   return result;
 };
 
@@ -116,26 +113,49 @@ Collection.prototype.show = function(id) {
  * @param {Function} callback passed response data
  */
 
-Collection.prototype.retrieveAll = function(callback) {
-  var collection = this;
+Collection.prototype.retrieveAll = (function() {
+  var running = false;
+  var queued = false;
 
-  this.io.emit(
-    'retrieveAll',
-    this.name,
-    this.handleResponse(function (data) {
-      console.log('Retrieved all models in', collection.name);
-      collection._storage.length = 0;
+  return function (callback) {
+    var collection = this;
+    queued = true;
+    if (!running) {
+      queued = false;
+      running = true;
 
-      data.forEach(function (props, index) {
-        collection._storage.push(new Model(props, collection.name, collection.io, collection.onchange));
-      });
+      action(callback, collection);
+    }
+  };
 
-      collection.onchange()
+  function action(callback, collection) {
+    collection.io.emit(
+      'retrieveAll',
+      collection.name,
+      collection.handleResponse(function (data) {
+        collection._storage.length = 0;
 
-      if (callback) callback(data);
-    })
-  );
-};
+        data.forEach(function (props, index) {
+          collection._storage.push(new Model(props, collection.name, collection.io, collection.onChange));
+        });
+
+        collection.onChange();
+
+        if (callback) callback(data);
+        collection.onChange();
+      })
+    );
+
+    setTimeout(function () {
+        if (queued) {
+          queued = false;
+          action(callback, collection);
+        } else {
+          running = false;
+        }
+    }, 1000);
+  }
+})();
 
 /**
  * Gets single document from collection
@@ -145,9 +165,7 @@ Collection.prototype.retrieveAll = function(callback) {
  */
 
 Collection.prototype.retrieveOne = function(id, callback) {
-  if (!id) {
-    throw 'first argument should be an model ID';
-  }
+  if (!id) throw 'first argument should be an model ID';
 
   var collection = this;
 
@@ -156,10 +174,11 @@ Collection.prototype.retrieveOne = function(id, callback) {
     this.name,
     id,
     this.handleResponse(function (data) {
-      var model = new Model(data, collection.name, collection.io, collection.onchange);
+      var model = new Model(data, collection.name, collection.io, collection.onChange);
       collection._storage.push(model);
 
       if (callback) callback(model);
+      collection.onChange();
     })
   );
 };
@@ -171,28 +190,20 @@ Collection.prototype.retrieveOne = function(id, callback) {
  */
 
 Collection.prototype.create = function(set, callback) {
-  if (!set) {
-    throw 'first argument should be an object';
-  }
+  if (!set) throw 'first argument should be an object';
 
   var collection = this;
-  console.log(this, this.name);
+
   this.io.emit(
     'create',
     this.name,
     set,
-    this.handleResponse(function (data) {
-      if (callback) callback(data);
-    })
+    this.handleResponse(callback)
   );
 };
 
 Collection.prototype.update = function(where, set, callback) {
-  if (!where || !set) {
-    throw 'first two arguments should be objects';
-  } else if (!callback) {
-    throw 'third argument should be a callback';
-  }
+  if (!where || !set) throw 'first two arguments should be objects';
 
   var collection = this;
 
@@ -201,9 +212,7 @@ Collection.prototype.update = function(where, set, callback) {
     this.name,
     where,
     set,
-    this.handleResponse(function (data) {
-      if (callback) callback(data);
-    })
+    this.handleResponse(callback)
   );
 };
 
@@ -211,9 +220,7 @@ Collection.prototype.deleteAll = function(callback) {
   this.io.emit(
     'deleteAll',
     this.name,
-    this.handleResponse(function (deleted) {
-      if (callback) callback();
-    })
+    this.handleResponse(callback)
   );
 };
 
@@ -222,21 +229,31 @@ Collection.prototype.handleResponse = function(callback) {
   return function (err, data) {
     if (err) {
       throw err;
-    } else {
-      if (callback) callback(data);
     }
-    //data binding update trigger
-    collection.onchange();
+    if (callback) callback(data);
+    collection.onChange();
   };
 };
 
-var bindProperty = function (property, value, context) {
-  var prefix = '__bound';
+Collection.prototype.handleBroadcast = function(callback) {
+  collection = this;
+
+  return function (collectionName, data) {
+    if (collection.name === collectionName) {
+      callback(data);
+
+      //data binding update trigger
+      //collection.onChange();
+    }
+  };
+};
+
+var bindProperty = function (property, value, context, prefix) {
 
   Object.defineProperty(context, prefix + property, {
-      value: value,
-      writable: true
-    });
+    value: value,
+    writable: true
+  });
 
   Object.defineProperty(context, property, {
     get: function () {
@@ -245,8 +262,8 @@ var bindProperty = function (property, value, context) {
     set: function (value) {
       var context = this;
       var set = {};
-
       set[property] = value;
+
       this.update(set, function (data) {
         context[prefix + property] = value;
       });
@@ -262,33 +279,24 @@ var bindProperty = function (property, value, context) {
  * @param {connection} Reference to socket
  */
 
-var Model = function (obj, collectionName, connection, onchange) {
+var Model = function (obj, collectionName, connection, onChange) {
   this.collection = collectionName;
   this.io = connection;
+  this.onChange = onChange || function(){};
 
   var context = this;
-  var prefix = '__bound';
-
-  // Data binding listeners
-  this.io.on('broadcast', function (eventType, data) {
-    if (eventType === 'update') {
-      data.forEach(function (model) {
-        if (model._id === context._id) {
-          console.log('Event "update": model', model._id, 'from', collectionName);
-          for (var property in model) {
-            context[prefix + property] = model[property];
-          }
-        }
-      });
-    }
-    //data binding update trigger
-    onchange();
-  });
+  this.prefix = '__bound';
 
   for (var prop in obj) {
-    bindProperty(prop, obj[prop], this);
+    bindProperty(prop, obj[prop], this, this.prefix);
   }
 };
+
+Model.prototype.set = function(set){
+  for (var prop in set){
+    this[this.prefix+prop] = set[prop];
+  }
+}
 
 /**
  * Updates a single object
@@ -303,9 +311,7 @@ Model.prototype.update = function(set, callback) {
     this.collection,
     this._id,
     set,
-    this.handleResponse(function (data) {
-      if (callback) callback(data);
-    })
+    this.handleResponse(callback)
   );
 };
 
@@ -318,18 +324,18 @@ Model.prototype.delete = function (callback) {
     'deleteOne',
     this.collection,
     this._id,
-    this.handleResponse(function (data) {
-      if (callback) callback();
-    })
+    this.handleResponse(callback)
   );
 };
 
 Model.prototype.handleResponse = function (callback) {
+  var model = this;
   return function (err, data) {
     if (err) {
       throw err;
     } else {
       if (callback) callback(data);
+      model.onChange();
     }
   };
 };

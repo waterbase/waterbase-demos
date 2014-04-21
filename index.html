@@ -32,23 +32,37 @@
   </style>
   <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.3.0-beta.3/angular.min.js"></script>
   <script src="waterbase.js"></script>
-  <script src="http://10.4.2.246:20000/socket.io/socket.io.js"></script>
+  <script src="http://immense-spire-9816.herokuapp.com/socket.io/socket.io.js"></script>
   <script>
 angular.module('app', [])
   .controller('ListController', ['$scope', function($scope){
     //establish a new connection, once per app
-    var waterbase = new Waterbase('http://10.4.2.246:20000', null, function(){
+    var waterbase = new Waterbase('http://immense-spire-9816.herokuapp.com', null, function(){
+      /*
+        this optional argument is a function
+        to be called when the data updates.
+        for angular it is calling $apply or $digest,
+        depending on the scope of the update
+        for other frameworks, pass in their version
+        of the angular's $digest
+      */
+      console.log('digest')
       $scope.$digest();
     });
 
     //get the collection from the connection, once per collection
-    var taskList = waterbase.collection('task');
+    var taskList = waterbase.collection('tasks');
 
     //use restful methods to access and manipulate data
     $scope.list = taskList.list();
 
     $scope.remove = function(item){
       item.delete();
+    }
+
+    $scope.toggleComplete = function(item){
+      //plain assignment triggers updates
+      item.completed = !item.completed
     }
 
     $scope.submit = function(){
@@ -58,10 +72,9 @@ angular.module('app', [])
       }
 
       //using waterbase to create a new task
-      console.log({
-        name: $scope.newTask,
-        completed: false
-      });
+      //also updates the database schema if an attribute 
+      //does not yet exists on the database schema
+      //these and only these attributes will be updated in real time
       taskList.create({
         name: $scope.newTask,
         test: 'test',
@@ -81,7 +94,7 @@ angular.module('app', [])
       <input type="text" ng-model="newTask">
       <button ng-click="submit()">submit</button>
     </div>
-    <div class="task" ng-repeat="item in list" ng-click="item.completed = !item.completed">
+    <div class="task" ng-repeat="item in list" ng-click="toggleComplete(item)">
       <div ng-class="{done: item.completed, waiting: !item.completed}"></div>
       <div class="name">{{item.name}}</div>
       <button ng-click="remove(item)">remove</button>
